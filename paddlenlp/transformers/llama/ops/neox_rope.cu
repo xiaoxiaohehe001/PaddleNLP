@@ -32,63 +32,68 @@ __global__ void NeoXRotaryKernel(const T *input,
                                  T *output,
                                  const int rotary_emb_dims,
                                  const int batch_size,
-                                 const int num_head,
                                  const int seq_len,
+                                 const int num_head,
+                                 const int dim_head,
+                                 const int dim_head_mul3,
                                  const int last_dim) {
-  int bi = blockIdx.x;
-  int hi = blockIdx.y;
-  int si = blockIdx.z;
+  int bi = blockIdx.x; // batch_idx
+  int si = blockIdx.y; // seq_idx
+  int hi = blockIdx.z; // head_idx
+
   if (sequence_lengths && si >= sequence_lengths[bi] * rotary_emb_dims) return;
   int half_lastdim = last_dim / 2;
-  for (int ti = threadIdx.x; ti < half_lastdim; ti += blockDim.x) {
-    int base_idx = bi * num_head * seq_len * last_dim +
-                   hi * seq_len * last_dim + si * last_dim;
-    int left_idx = base_idx + ti;
-    const int right_idx = base_idx + ti + half_lastdim;
-    int emb_idx_left = bi * seq_len * last_dim + si * last_dim + ti;
-    int emb_idx_right =
-        bi * seq_len * last_dim + si * last_dim + ti + half_lastdim;
-    float input_left = static_cast<float>(input[left_idx]);
-    float input_right = static_cast<float>(input[right_idx]);
+  for(int qk_idx = 0; qk_idx < 2; qk_idx++){
+    for (int ti = threadIdx.x; ti < half_lastdim; ti += blockDim.x) {
+        int base_idx = bi * seq_len * num_head * dim_head_mul3 +
+                       si * num_head * dim_head_mul3 + 
+                       hi * dim_head_mul3 + qk_idx * dim_head; 
 
-    float cos_tmp_left = cos_emb[emb_idx_left];
-    float sin_tmp_left = sin_emb[emb_idx_left];
-    float cos_tmp_right = cos_emb[emb_idx_right];
-    float sin_tmp_right = sin_emb[emb_idx_right];
+        int left_idx = base_idx + ti;
+        const int right_idx = base_idx + ti + half_lastdim;
+        int emb_idx_left = bi * seq_len * last_dim + si * last_dim + ti;
+        int emb_idx_right =
+            bi * seq_len * last_dim + si * last_dim + ti + half_lastdim;
+        float input_left = static_cast<float>(input[left_idx]);
+        float input_right = static_cast<float>(input[right_idx]);
 
-    T res1 =
-        static_cast<T>(input_left * cos_tmp_left - input_right * sin_tmp_left);
-    T res2 = static_cast<T>(input_right * cos_tmp_right +
-                            input_left * sin_tmp_right);
-    output[left_idx] = res1;
-    output[right_idx] = res2;
+        float cos_tmp_left = cos_emb[emb_idx_left];
+        float sin_tmp_left = sin_emb[emb_idx_left];
+        float cos_tmp_right = cos_emb[emb_idx_right];
+        float sin_tmp_right = sin_emb[emb_idx_right];
+
+        T res1 =
+            static_cast<T>(input_left * cos_tmp_left - input_right * sin_tmp_left);
+        T res2 = static_cast<T>(input_right * cos_tmp_right +
+                                input_left * sin_tmp_right);
+        output[left_idx] = res1;
+        output[right_idx] = res2;
+    }
   }
 }
 
 
 template <paddle::DataType D>
-std::vector<paddle::Tensor> LaunchRotaryQK(const paddle::Tensor& q, 
-                                           const paddle::Tensor& k, 
+std::vector<paddle::Tensor> LaunchRotaryQK(const paddle::Tensor& qkv, 
                                            const paddle::Tensor& rotary_emb) {
     typedef PDTraits<D> traits_;
     typedef typename traits_::DataType DataType_;
     typedef typename traits_::data_t data_t;
 
-    const int64_t batch_size = q.shape()[0]; 
-    const int64_t num_head = q.shape()[1]; 
-    const int64_t seq_len = q.shape()[2]; 
-    const int64_t dim_head = q.shape()[3]; 
+    const int rotary_emb_dims = 1; // Since LLAMA Neox RotaryEmbedding no need rotary_emb_dims. Author(Zhengzekang)
+    const int64_t batch_size = qkv.shape()[0]; 
+    const int64_t seq_len = qkv.shape()[1]; 
+    const int64_t num_head = qkv.shape()[2]; 
+    const int64_t dim_head_mul3 = qkv.shape()[3]; 
+    const int64_t dim_head = dim_head_mul3 / 3; 
 
-    auto q_out = paddle::full({batch_size, num_head, seq_len, dim_head}, -1, q.dtype(), q.place());
-    auto k_out = paddle::full({batch_size, num_head, seq_len, dim_head}, -1, k.dtype(), k.place());
+    auto qkv_out = paddle::full({batch_size, seq_len, num_head,dim_head_mul3}, -1, qkv.dtype(), qkv.place());
 
-    auto cu_stream = q.stream();
-
+    auto cu_stream = qkv.stream();
     assert(dim_head % 2 == 0); 
     
-    dim3 grid(batch_size, num_head, seq_len);
-    const int rotary_emb_dims = 1; // Since LLAMA Neox RotaryEmbedding no need rotary_emb_dims. 
-    const int last_dim = dim_head;
+    dim3 grid(batch_size, seq_len * rotary_emb_dims, num_head);
+    const int last_dim = dim_head / rotary_emb_dims;
     auto getBlockSize = [](int dim) {
         if (dim > 256) {
         return 512;
@@ -105,49 +110,41 @@ std::vector<paddle::Tensor> LaunchRotaryQK(const paddle::Tensor& q,
     int BlockSize = getBlockSize(last_dim / 2);
     const float *cos_emb = rotary_emb.data<float>();
     const float *sin_emb = rotary_emb.data<float>() + batch_size * seq_len * dim_head;
+    const int64_t offset = batch_size * seq_len * num_head * dim_head; 
+    const DataType_* qkv_data = reinterpret_cast<const DataType_*>(qkv.data<data_t>()); 
 
     NeoXRotaryKernel<<<grid, BlockSize, 0, cu_stream>>>(
-        reinterpret_cast<const DataType_*>(q.data<data_t>()), 
+        qkv_data,
         cos_emb,
         sin_emb,
         nullptr, /*sequence_lengths*/ // TODO(Zhengzekang): Support Variable length. 
-        reinterpret_cast<DataType_*>(const_cast<data_t*>(q_out.data<data_t>())),
+        reinterpret_cast<DataType_*>(const_cast<data_t*>(qkv_out.data<data_t>())),
         rotary_emb_dims,
         batch_size,
-        num_head,
         seq_len * rotary_emb_dims,
-        last_dim);
-    NeoXRotaryKernel<<<grid, BlockSize, 0, cu_stream>>>(
-        reinterpret_cast<const DataType_*>(k.data<data_t>()),
-        cos_emb,
-        sin_emb,
-        nullptr, /*sequence_lengths*/ // TODO(Zhengzekang): Support Variable length. 
-        reinterpret_cast<DataType_*>(const_cast<data_t*>(k_out.data<data_t>())),
-        rotary_emb_dims,
-        batch_size,
         num_head,
-        seq_len * rotary_emb_dims,
+        dim_head, 
+        dim_head_mul3, 
         last_dim);
-    return {q_out, k_out};
+    return {qkv_out};
 }
 
-std::vector<paddle::Tensor> RotaryQK(const paddle::Tensor& q, 
-                                     const paddle::Tensor& k, 
+std::vector<paddle::Tensor> RotaryQK(const paddle::Tensor& qkv, 
                                      const paddle::Tensor& rotary_emb) {
-    switch (q.type()) {
+    switch (qkv.type()) {
         case paddle::DataType::BFLOAT16: {
             return LaunchRotaryQK<paddle::DataType::BFLOAT16>(
-                q, k, rotary_emb
+                qkv, rotary_emb
             );
         }
         case paddle::DataType::FLOAT16: {
             return LaunchRotaryQK<paddle::DataType::FLOAT16>(
-                q, k, rotary_emb
+                qkv, rotary_emb
             );
         }
         case paddle::DataType::FLOAT32: {
             return LaunchRotaryQK<paddle::DataType::FLOAT32>(
-                q, k, rotary_emb
+                qkv, rotary_emb
             );
         }
         default: {
@@ -160,27 +157,25 @@ std::vector<paddle::Tensor> RotaryQK(const paddle::Tensor& q,
 }
 
 
-std::vector<std::vector<int64_t>> RotaryQKInferShape(const std::vector<int64_t>& q_shape, 
-                                                     const std::vector<int64_t>& k_shape, 
+std::vector<std::vector<int64_t>> RotaryQKInferShape(const std::vector<int64_t>& qkv_shape, 
                                                      const std::vector<int64_t>& rotary_emb_shape) {
-    const int64_t batch_size = q_shape[0]; 
-    const int64_t num_head = q_shape[0]; 
-    const int64_t seq_len = q_shape[0]; 
-    const int64_t dim_head = q_shape[0]; 
+    const int64_t batch_size = qkv_shape[0]; 
+    const int64_t seq_len = qkv_shape[1]; 
+    const int64_t num_head = qkv_shape[2]; 
+    const int64_t dim_head = qkv_shape[3] / 3; // Since QKV 
 
-    std::vector<int64_t> q_out_shape = {batch_size, num_head, seq_len, dim_head};                                                          
-    return {q_out_shape, q_out_shape};
+    std::vector<int64_t> qkv_out_shape = {batch_size, seq_len, num_head, dim_head * 3};                                                          
+    return {qkv_out_shape};
 }
 
-std::vector<paddle::DataType> RotaryQKInferDtype(const paddle::DataType& q_dtype, 
-                                                 const paddle::DataType& k_dtype, 
+std::vector<paddle::DataType> RotaryQKInferDtype(const paddle::DataType& qkv_dtype, 
                                                  const paddle::DataType& rotary_emb_dtype) {
-    return {q_dtype, k_dtype};
+    return {qkv_dtype};
 }
 
 PD_BUILD_OP(neox_rope)
-    .Inputs({"q", "k", "rotary_emb"})
-    .Outputs({"q_out", "k_out"})
+    .Inputs({"qkv", "rotary_emb"})
+    .Outputs({"qkv_out"})
     .SetKernelFn(PD_KERNEL(RotaryQK))
     .SetInferShapeFn(PD_INFER_SHAPE(RotaryQKInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(RotaryQKInferDtype));
