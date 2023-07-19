@@ -123,7 +123,7 @@ std::vector<paddle::Tensor> LaunchWriteCacheKV(const paddle::Tensor& input_kv,
     const int64_t seq_len = input_kv.shape()[3]; 
     const int64_t dim_head = input_kv.shape()[4]; 
 
-    auto cache_kv_out = paddle::full({bsz}, -1, cache_kv.dtype(), cache_kv.place());
+    auto cache_kv_out = paddle::full({1}, -1, cache_kv.dtype(), cache_kv.place());
 
     const DataType_ *k_ptr = nullptr;
     const DataType_ *v_ptr = nullptr;
@@ -196,8 +196,7 @@ std::vector<paddle::Tensor> WriteCacheKV(const paddle::Tensor& input_kv,
 std::vector<std::vector<int64_t>> WriteCacheKVInferShape(const std::vector<int64_t>& input_kv_shape, 
                                                      const std::vector<int64_t>& cache_kv_shape,
                                                      const std::vector<int64_t>& sequence_lengths_shape) {
-    const int64_t bsz = cache_kv_shape[1]; 
-    std::vector<int64_t> cache_kv_out_shape = {bsz};                                                                                                   
+    std::vector<int64_t> cache_kv_out_shape = {1};                                                                                                   
     return {cache_kv_out_shape};
 }
 

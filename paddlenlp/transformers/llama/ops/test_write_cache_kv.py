@@ -5,16 +5,16 @@ from paddle import Tensor, nn
 from custom_setup_ops import write_cache_kv
 
 dtype = paddle.bfloat16
-batch_size = 1
-num_head = 2
-seq_len = 1
-head_size = 16
-max_seq_len = 4
+batch_size = 3
+num_head = 32
+seq_len = 6
+head_size = 128
+max_seq_len = 9
 
 
 input_kv = paddle.cast(paddle.to_tensor(np.random.randn(2, batch_size, num_head, seq_len, head_size)), dtype)
 cache_kv = paddle.cast(paddle.to_tensor(np.zeros([2, batch_size, num_head, max_seq_len, head_size])), dtype)
-seq_data = paddle.cast(paddle.to_tensor(np.array([1])), "int32")
+seq_data = paddle.cast(paddle.to_tensor(np.array([seq_len, seq_len, seq_len])), "int32")
 
 cache_kv_out = write_cache_kv(input_kv, cache_kv, seq_data)
 
