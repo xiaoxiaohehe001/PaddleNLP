@@ -4,6 +4,6 @@ setup(
     name='custom_setup_ops',
     ext_modules=CUDAExtension(
         sources=[
-            'neox_rope.cu']
+            "neox_rope.cu", 'write_cache_kv.cu', ]
     )
 )
