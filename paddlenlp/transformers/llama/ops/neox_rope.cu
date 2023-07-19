@@ -126,12 +126,14 @@ template <paddle::DataType D>
 std::vector<paddle::Tensor> LaunchRotaryQK(const paddle::Tensor& qkv, 
                                            const paddle::Tensor& rotary_emb, 
                                            const paddle::Tensor& padding_offset, 
-                                           const paddle::Tensor& seq_lens) {
+                                           const paddle::Tensor& seq_lens, 
+                                           bool use_neox) {
     typedef PDTraits<D> traits_;
     typedef typename traits_::DataType DataType_;
     typedef typename traits_::data_t data_t;
 
     const int rotary_emb_dims = 1; // Since LLAMA Neox RotaryEmbedding no need rotary_emb_dims. Author(Zhengzekang)
+
     // rotary_emb shape: batchsize * 2, 1, maxseq_length, head_size
     const int64_t batch_size = rotary_emb.shape()[0] / 2; // since cos_emb and sin_emb is stack in axis0. 
     const int64_t seq_len = rotary_emb.shape()[2]; 
@@ -159,43 +161,49 @@ std::vector<paddle::Tensor> LaunchRotaryQK(const paddle::Tensor& qkv,
     const int32_t* padding_offset_data = reinterpret_cast<const int32_t*>(padding_offset.data<int32_t>()); 
     const int32_t* seq_lens_data = reinterpret_cast<const int32_t*>(seq_lens.data<int32_t>()); 
 
-    VariableLengthNeoXRotaryKernel<<<grid_size, kBlockSize, 0, cu_stream>>>(
-        qkv_data,
-        padding_offset_data, 
-        seq_lens_data, 
-        cos_emb,
-        sin_emb,
-        reinterpret_cast<DataType_*>(const_cast<data_t*>(qkv.data<data_t>())),
-        elem_cnt, 
-        rotary_emb_dims,
-        batch_size,
-        seq_len * rotary_emb_dims,
-        token_num, 
-        num_head,
-        dim_head, 
-        dim_head_mul3, 
-        last_dim);
+    if(use_neox){
+        VariableLengthNeoXRotaryKernel<<<grid_size, kBlockSize, 0, cu_stream>>>(
+            qkv_data,
+            padding_offset_data, 
+            seq_lens_data, 
+            cos_emb,
+            sin_emb,
+            reinterpret_cast<DataType_*>(const_cast<data_t*>(qkv.data<data_t>())),
+            elem_cnt, 
+            rotary_emb_dims,
+            batch_size,
+            seq_len * rotary_emb_dims,
+            token_num, 
+            num_head,
+            dim_head, 
+            dim_head_mul3, 
+            last_dim);
+    } else {
+        PD_THROW("Currently only support use_neox=True.");
+    }
+    
     return {tmp_out};
 }
 
 std::vector<paddle::Tensor> RotaryQK(const paddle::Tensor& qkv, 
                                      const paddle::Tensor& rotary_emb, 
                                      const paddle::Tensor& padding_offset, 
-                                     const paddle::Tensor& seq_lens) {
+                                     const paddle::Tensor& seq_lens, 
+                                     bool use_neox) {
     switch (qkv.type()) {
         case paddle::DataType::BFLOAT16: {
             return LaunchRotaryQK<paddle::DataType::BFLOAT16>(
-                qkv, rotary_emb, padding_offset, seq_lens
+                qkv, rotary_emb, padding_offset, seq_lens, use_neox
             );
         }
         case paddle::DataType::FLOAT16: {
             return LaunchRotaryQK<paddle::DataType::FLOAT16>(
-                qkv, rotary_emb, padding_offset, seq_lens
+                qkv, rotary_emb, padding_offset, seq_lens, use_neox
             );
         }
         case paddle::DataType::FLOAT32: {
             return LaunchRotaryQK<paddle::DataType::FLOAT32>(
-                qkv, rotary_emb, padding_offset, seq_lens
+                qkv, rotary_emb, padding_offset, seq_lens, use_neox
             );
         }
         default: {
@@ -226,6 +234,7 @@ std::vector<paddle::DataType> RotaryQKInferDtype(const paddle::DataType& qkv_dty
 PD_BUILD_OP(neox_rope)
     .Inputs({"qkv", "rotary_emb", "seq_lens", "padding_offset"})
     .Outputs({"tmp_out"})
+    .Attrs({"use_neox: bool"})
     .SetKernelFn(PD_KERNEL(RotaryQK))
     .SetInferShapeFn(PD_INFER_SHAPE(RotaryQKInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(RotaryQKInferDtype));

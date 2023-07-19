@@ -166,7 +166,7 @@ baseline_k_out_flatten = get_flatten_remove_padding_rope(baseline_k_out, seq_len
 print("Baseline q out flatten: ", baseline_q_out_flatten)
 print("Baseline k out flatten: ", baseline_k_out_flatten)
 
-neox_rope(flatten_qkv, rotary_embedding, padding_offset, paddle_seq_length)
+neox_rope(flatten_qkv, rotary_embedding, padding_offset, paddle_seq_length, use_neox=True)
 print("After Custom neox rope Q: ", flatten_qkv[:, :, :head_size])
 print("After Custom neox rope K: ", flatten_qkv[:, :, head_size:2*head_size])
 
